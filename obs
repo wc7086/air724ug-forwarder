@@ -1,81 +1,140 @@
--- 每小时自动重启录制的OBS Lua脚本
+-- OBS 智能分段录制脚本
 local obs = obslua
 local timer = nil
-local next_time = 0
 
--- 记录日志到OBS脚本日志窗口
+-- 日志记录函数
 function log(message)
-    obs.script_log(obs.LOG_INFO, "[每小时录制] "..message)
+    local ts = os.date("%H:%M:%S")
+    obs.script_log(obs.LOG_INFO, "["..ts.."][智能录制] "..message)
 end
 
--- 计算下一个整点的时间戳
-function calculate_next_hour()
+-- 安全移除定时器
+function remove_timer()
+    if timer then
+        obs.timer_remove(timer)
+        timer = nil
+        log("定时器已移除")
+    end
+end
+
+-- 计算下一小时的时间戳
+function next_hour_delay()
     local now = os.time()
-    local time_table = os.date("*t", now)
-    
-    -- 计算到下个整点的秒数
-    local seconds_to_next = 3600 - (time_table.min * 60 + time_table.sec)
-    next_time = now + seconds_to_next
-    
-    log("下次重启时间: "..os.date("%H:%M:%S", next_time))
-    return seconds_to_next * 1000  -- 转换为毫秒
+    local next_h = now - (now % 3600) + 3600
+    return (next_h - now) * 1000  -- 返回毫秒
 end
 
--- 执行重启录制操作
+-- 创建日期目录
+function create_date_dir(base_path)
+    -- 标准化路径格式
+    base_path = base_path:gsub("\\", "/"):gsub("/+$", "")
+    
+    -- 生成年月路径
+    local t = os.date("*t")
+    local date_path = string.format("%s/%d/%02d/", base_path, t.year, t.month)
+    
+    -- 执行创建命令
+    local cmd
+    if package.config:sub(1,1) == "\\" then  -- Windows
+        cmd = string.format('mkdir "%s" 2>nul', date_path)
+    else  -- macOS/Linux
+        cmd = string.format('mkdir -p "%s" 2>/dev/null', date_path)
+    end
+    
+    if os.execute(cmd) then
+        log("目录已创建: "..date_path)
+        return date_path
+    else
+        log("目录创建失败，使用默认路径")
+        return base_path
+    end
+end
+
+-- 更新录制路径
+function update_recording_path()
+    local service = obs.obs_frontend_get_record_output()
+    if not service then return end
+    
+    local settings = obs.obs_output_get_settings(service)
+    local current_path = obs.obs_data_get_string(settings, "path") or ""
+    
+    -- 获取基础路径
+    local base_dir = current_path:match("^(.*/)[^/]*$") or ""
+    if base_dir == "" then
+        base_dir = obs.obs_frontend_get_current_record_output_path()
+        base_dir = base_dir:match("^(.*/)[^/]*$") or ""
+    end
+    
+    -- 创建新路径
+    local new_path = create_date_dir(base_dir)
+    
+    -- 更新设置
+    obs.obs_data_set_string(settings, "path", new_path)
+    obs.obs_output_update(service, settings)
+    
+    -- 释放资源
+    obs.obs_data_release(settings)
+    obs.obs_output_release(service)
+    
+    log("录制路径更新为: "..new_path)
+end
+
+-- 重启录制流程
 function restart_recording()
-    -- 先停止录制
+    -- 停止录制
     if obs.obs_frontend_recording_active() then
         log("正在停止当前录制...")
         obs.obs_frontend_recording_stop()
     end
     
-    -- 1秒后启动新录制（确保文件保存完成）
+    -- 1秒后启动新录制
     obs.timer_add(function()
-        if not obs.obs_frontend_recording_active() then
-            log("开始新录制周期")
-            obs.obs_frontend_recording_start()
+        -- 更新路径
+        local ok, err = pcall(update_recording_path)
+        if not ok then
+            log("路径更新错误: "..tostring(err))
         end
-        set_timer()  -- 重新设置定时器
+        
+        -- 开始录制
+        if not obs.obs_frontend_recording_active() then
+            obs.obs_frontend_recording_start()
+            log("新录制已启动")
+        end
+        
+        -- 重置定时器
+        remove_timer()
+        timer = obs.timer_add(restart_recording, next_hour_delay())
+        log("下一周期定时器已设置")
     end, 1000)
 end
 
--- 设置定时器
-function set_timer()
-    if timer then
-        obs.timer_remove(timer)
-    end
-    local delay = calculate_next_hour()
-    timer = obs.timer_add(restart_recording, delay)
-    log("定时器已设置，等待下一个周期...")
-end
-
--- 脚本加载时初始化
-function script_load(settings)
+-- 脚本生命周期
+function script_load()
     log("脚本已加载")
-    set_timer()
+    timer = obs.timer_add(restart_recording, next_hour_delay())
 end
 
--- 脚本卸载时清理
 function script_unload()
-    if timer then
-        obs.timer_remove(timer)
-        log("定时器已移除")
-    end
+    log("脚本卸载中...")
+    remove_timer()
     log("脚本已卸载")
 end
 
--- 以下为OBS脚本标准声明
+-- v31专用属性声明
 script_properties = {
-    {
-        type = obs.OBS_PROPERTY_INFO,
-        name = "info",
-        description = "每小时自动重启录制 v1.0"
+    obs.properties_add_text {
+        name = "info_header",
+        description = "智能分段录制 v2.0\n\n功能特性：\n✔ 每小时自动分段\n✔ 按年月归档视频\n✔ 自动路径管理",
+        type = obs.OBS_TEXT_INFO
     }
 }
 
-script_description = "每小时自动重启录制（确保录制分段）"
+script_description = [[
+[OBS v31 专用录制助手]
+自动执行以下操作：
+1. 每小时准点重启录制
+2. 自动创建年/月目录
+3. 智能处理路径异常
 
-function script_update(settings)
-    -- 当设置变化时重新初始化
-    set_timer()
-end
+版本要求：OBS Studio 31.x
+]]
