@@ -1,0 +1,81 @@
+-- 每小时自动重启录制的OBS Lua脚本
+local obs = obslua
+local timer = nil
+local next_time = 0
+
+-- 记录日志到OBS脚本日志窗口
+function log(message)
+    obs.script_log(obs.LOG_INFO, "[每小时录制] "..message)
+end
+
+-- 计算下一个整点的时间戳
+function calculate_next_hour()
+    local now = os.time()
+    local time_table = os.date("*t", now)
+    
+    -- 计算到下个整点的秒数
+    local seconds_to_next = 3600 - (time_table.min * 60 + time_table.sec)
+    next_time = now + seconds_to_next
+    
+    log("下次重启时间: "..os.date("%H:%M:%S", next_time))
+    return seconds_to_next * 1000  -- 转换为毫秒
+end
+
+-- 执行重启录制操作
+function restart_recording()
+    -- 先停止录制
+    if obs.obs_frontend_recording_active() then
+        log("正在停止当前录制...")
+        obs.obs_frontend_recording_stop()
+    end
+    
+    -- 1秒后启动新录制（确保文件保存完成）
+    obs.timer_add(function()
+        if not obs.obs_frontend_recording_active() then
+            log("开始新录制周期")
+            obs.obs_frontend_recording_start()
+        end
+        set_timer()  -- 重新设置定时器
+    end, 1000)
+end
+
+-- 设置定时器
+function set_timer()
+    if timer then
+        obs.timer_remove(timer)
+    end
+    local delay = calculate_next_hour()
+    timer = obs.timer_add(restart_recording, delay)
+    log("定时器已设置，等待下一个周期...")
+end
+
+-- 脚本加载时初始化
+function script_load(settings)
+    log("脚本已加载")
+    set_timer()
+end
+
+-- 脚本卸载时清理
+function script_unload()
+    if timer then
+        obs.timer_remove(timer)
+        log("定时器已移除")
+    end
+    log("脚本已卸载")
+end
+
+-- 以下为OBS脚本标准声明
+script_properties = {
+    {
+        type = obs.OBS_PROPERTY_INFO,
+        name = "info",
+        description = "每小时自动重启录制 v1.0"
+    }
+}
+
+script_description = "每小时自动重启录制（确保录制分段）"
+
+function script_update(settings)
+    -- 当设置变化时重新初始化
+    set_timer()
+end
